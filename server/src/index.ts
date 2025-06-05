@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { getAdvisors, activeAdvisor } from "./api";
+import { getAdvisors, updateAdvisor } from "./api";
 import { z } from "zod";
 
 // Create server instance
@@ -21,12 +21,13 @@ server.tool(
 );
 
 server.tool(
-    "active-advisor",
-    "Activate an advisor by phone number",
+    "update-advisor",
+    "Update the status of an advisor by phone number",
     {
-        phone: z.string().describe("Phone number of the advisor to activate")
+        phone: z.string().describe("Phone number of the advisor to activate"),
+        status: z.boolean().describe("Indicates if the advisor its active or inactive")
     },
-    activeAdvisor
+    updateAdvisor
 );
 
 async function main() {

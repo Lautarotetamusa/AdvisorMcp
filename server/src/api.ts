@@ -5,11 +5,9 @@ async function makeRequest<T>(url: string, payload?: object): Promise<T | null> 
         headers: {
             Accept: "application/json",
         },
+        method: payload ? "PUT" : "GET",
         body: JSON.stringify(payload)
     }
-    //if (payload) {
-    //    options["body"] = JSON.stringify(payload)
-    //}
 
     try {
         const response = await fetch(url, options);
@@ -56,10 +54,11 @@ function formatAdvisor(a: Advisor): string {
     "---";
 }
 
-export async function activeAdvisor(args: {phone: string}): Response {
+export async function updateAdvisor(args: {phone: string, status: boolean}): Response {
+    console.log("Calling activeAdvisor");
     const advisorUrl = `${API_BASE}/asesor/${args.phone}`;
     const payload = {
-        "active": true,
+        "active": args.status,
     }
     const response = await makeRequest<BasicApiResponse>(advisorUrl, payload);
     if (!response) {
@@ -91,6 +90,7 @@ export async function activeAdvisor(args: {phone: string}): Response {
 }
 
 export async function getAdvisors(): Response {
+    console.log("Calling getAdvisors");
     const advisorUrl = `${API_BASE}/asesor`;
     const advisorsData = await makeRequest<AdvisorListResponse>(advisorUrl);
 
@@ -124,7 +124,7 @@ export async function getAdvisors(): Response {
         content: [
             {
                 type: "text",
-                text: advisorsText,
+                text: JSON.stringify(advisors),
             },
         ],
     };

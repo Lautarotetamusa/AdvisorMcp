@@ -1,49 +1,63 @@
+import OpenAI from "openai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import readline from "readline/promises";
 import dotenv from "dotenv";
-import OpenAI from 'openai';
-import { Messages } from "openai/resources/chat/completions";
 
-dotenv.config();
+dotenv.config({path: "../.env"});
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-if (!ANTHROPIC_API_KEY) {
-  throw new Error("ANTHROPIC_API_KEY is not set");
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
+if (!DEEPSEEK_API_KEY) {
+    throw new Error("DEEPSEEK_API_KEY is not set");
 }
 
 class MCPClient {
     private mcp: Client;
-    private model: OpenAI;
+    private openai: OpenAI;
     private transport: StdioClientTransport | null = null;
-    private tools;
+    private tools: OpenAI.ChatCompletionTool[] = [];
 
     constructor() {
-        this.model = new OpenAI({
-            apiKey: process.env['OPENAI_API_KEY'], // This is the default and can be omitted
+        this.openai = new OpenAI({
+            apiKey: DEEPSEEK_API_KEY,
+            baseURL: "https://api.deepseek.com/v1",
         });
-        this.mcp = new Client({ name: "mcp-client-cli", version: "1.0.0" });
+            this.mcp = new Client({ name: "mcp-client-cli", version: "1.0.0" });
     }
 
     async connectToServer(serverScriptPath: string) {
         try {
-            this.transport = new StdioClientTransport({
-                command: process.execPath,
-                args: [serverScriptPath],
-            });
-            this.mcp.connect(this.transport);
+            const isJs = serverScriptPath.endsWith(".js");
+            const isPy = serverScriptPath.endsWith(".py");
+            if (!isJs && !isPy) {
+                throw new Error("Server script must be a .js or .py file");
+            }
+            const command = isPy
+                ? process.platform === "win32"
+                ? "python"
+                : "python3"
+                    : process.execPath;
 
-            const toolsResult = await this.mcp.listTools();
-            this.tools = toolsResult.tools.map((tool) => {
-                return {
-                    name: tool.name,
-                    description: tool.description,
-                    input_schema: tool.inputSchema,
-                };
-            });
-            console.log(
-                "Connected to server with tools:",
-                this.tools.map(({ name }) => name)
-            );
+                    this.transport = new StdioClientTransport({
+                        command,
+                        args: [serverScriptPath],
+                    });
+                    await this.mcp.connect(this.transport);
+
+                    const toolsResult = await this.mcp.listTools();
+                    this.tools = toolsResult.tools.map((tool) => ({
+                        type: "function",
+                        function: {
+                            name: tool.name,
+                            description: tool.description,
+                            parameters: tool.inputSchema as Record<string, unknown>,
+                        },
+                    }));
+
+                    console.log(
+                        "Connected to server with tools:",
+                        this.tools.map((t) => t.function.name)
+                    );
         } catch (e) {
             console.log("Failed to connect to MCP server: ", e);
             throw e;
@@ -51,56 +65,111 @@ class MCPClient {
     }
 
     async processQuery(query: string) {
-        const messages: Messages[] = [
+        const messages: OpenAI.ChatCompletionMessageParam[] = [
             {
                 role: "user",
                 content: query,
             },
         ];
 
-        const response = await this.model.chat.completions({
-            model: "deep-seek-chat",
-            //max_tokens: 1000,
-            input: messages,
-            tools: this.tools,
-        });
+        let finalResponse = "";
+        let maxIterations = 5; // Prevenir loops infinitos
+        let iteration = 0;
 
-        const finalText = [];
-        const toolResults = [];
+        while (iteration < maxIterations) {
+            iteration++;
 
-        for (const content of response.content) {
-            if (content.type === "text") {
-                finalText.push(content.text);
-            } else if (content.type === "tool_use") {
-                const toolName = content.name;
-                const toolArgs = content.input as { [x: string]: unknown } | undefined;
+            const response = await this.openai.chat.completions.create({
+                model: "deepseek-chat",
+                messages,
+                tools: this.tools.length > 0 ? this.tools : undefined,
+                tool_choice: this.tools.length > 0 ? "auto" : "none",
+            });
 
-                const result = await this.mcp.callTool({
-                    name: toolName,
-                    arguments: toolArgs,
-                });
-                toolResults.push(result);
-                finalText.push(
-                    `[Calling tool ${toolName} with args ${JSON.stringify(toolArgs)}]`
-                );
+            const message = response.choices[0].message;
+            messages.push(message);
 
-                messages.push({
-                    role: "user",
-                    content: result.content as string,
-                });
+            // Si no hay llamadas a herramientas, retornamos la respuesta final
+            if (!message.tool_calls || message.tool_calls.length === 0) {
+                finalResponse = message.content || "";
+                break;
+            }
 
-                const response = await this.model.messages.create({
-                    model: "claude-3-5-sonnet-20241022",
-                    max_tokens: 1000,
-                    messages,
-                });
+            // Procesar cada llamada a herramienta
+            for (const toolCall of message.tool_calls) {
+                const toolName = toolCall.function.name;
+                const args = JSON.parse(toolCall.function.arguments);
 
-                finalText.push(
-                    response.content[0].type === "text" ? response.content[0].text : ""
-                );
+                // Registrar la llamada a la herramienta
+                console.log(`Calling tool: ${toolName} with args:`, args);
+
+                try {
+                    const result = await this.mcp.callTool({
+                        name: toolName,
+                        arguments: args,
+                    });
+
+                    // Extraer el contenido de texto de la respuesta
+                    let toolResponse = "";
+                    if (Array.isArray(result.content)) {
+                        for (const block of result.content) {
+                            if (block.type === "text") {
+                                toolResponse += block.text;
+                            }
+                        }
+                    } else if (typeof result.content === "string") {
+                        toolResponse = result.content;
+                    } else {
+                        toolResponse = JSON.stringify(result.content);
+                    }
+                    console.log(toolResponse);
+
+                    // Agregar la respuesta de la herramienta al historial
+                    messages.push({
+                        role: "tool",
+                        content: toolResponse,
+                        tool_call_id: toolCall.id,
+                    });
+                } catch (error) {
+                    console.error(`Error calling tool ${toolName}:`, error);
+                    messages.push({
+                        role: "tool",
+                        content: `Error executing tool ${toolName}: ${error}`,
+                        tool_call_id: toolCall.id,
+                    });
+                }
             }
         }
 
-        return finalText.join("\n");
+        return finalResponse;
+    }
+
+    async startCLI() {
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+        });
+
+        while (true) {
+            const query = await rl.question("You: ");
+            if (query.toLowerCase() === "exit") break;
+
+            const response = await this.processQuery(query);
+            console.log("\nAssistant:", response, "\n");
+        }
+
+        rl.close();
     }
 }
+
+// Uso del cliente
+async function main() {
+    const client = new MCPClient();
+
+    // Reemplazar con la ruta a tu script del servidor
+    await client.connectToServer("../server/build/index.js"); 
+
+    await client.startCLI();
+}
+
+main().catch(console.error);
